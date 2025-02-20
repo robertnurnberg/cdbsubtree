@@ -164,6 +164,7 @@ count_unseen_moves(Board &board,
                    std::vector<std::pair<std::string, int>> &result,
                    const std::uintptr_t handle, Stats &stats) {
   std::tuple<std::uint8_t, std::int16_t, int> count_unseen = {0, 0, 0};
+  std::get<1>(count_unseen) = result.front().second;
   Movelist moves;
   movegen::legalmoves(moves, board);
 
@@ -236,7 +237,7 @@ void explore(const fen_set_t::EmbeddedSet &fen_list, int depth,
 
     if (fens_with_unseen) {
       auto count_unseen = count_unseen_moves(board, result, handle, stats);
-      if (std::get<0>(count_unseen))
+      if (true || std::get<0>(count_unseen))
         fens_with_unseen->lazy_emplace_l(
             std::move(key), [](unseen_map_t::value_type &p) {},
             [&key, &count_unseen](const unseen_map_t::constructor &ctor) {
@@ -635,9 +636,7 @@ int main(int argc, char const *argv[]) {
       std::string fen = board.getFen(false);
       std::stringstream ss;
       ss << fen
-         << " c0 \"unseen moves: " << static_cast<int>(std::get<0>(pair.second))
-         << ", eval (gap): " << std::get<1>(pair.second) << " (" << std::showpos
-         << std::get<2>(pair.second) << ")\";\n";
+         << " c0 \"eval: " << std::get<1>(pair.second) << "\";\n";
       ufile << ss.str();
     }
     ufile.close();
