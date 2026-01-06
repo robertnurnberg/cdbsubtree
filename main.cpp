@@ -159,6 +159,23 @@ int get_eval_gap(int pos_eval, int child_move_eval) {
   return -child_move_eval - pos_eval;
 }
 
+// for chess960 uci::uciToMove only accepts KxR castling notation
+Move cdbuci_to_move(const Board &board, std::string_view uci) {
+  if (board.chess960() &&
+      (uci == "e1g1" || uci == "e1c1" || uci == "e8g8" || uci == "e8c8")) {
+    auto source = Square(uci.substr(0, 2));
+    auto target = Square(uci.substr(2, 2));
+    auto pt = board.at(source).type();
+
+    if (pt == PieceType::KING && board.at(target).type() == PieceType::NONE) {
+      target =
+          Square(target > source ? File::FILE_H : File::FILE_A, source.rank());
+      return Move::make<Move::CASTLING>(source, target);
+    }
+  }
+  return uci::uciToMove(board, uci);
+}
+
 std::tuple<std::uint8_t, std::int16_t, int>
 count_unseen_moves(Board &board,
                    std::vector<std::pair<std::string, int>> &result,
@@ -174,13 +191,14 @@ count_unseen_moves(Board &board,
   for (const auto &m : moves) {
     if (unscored_checked >= unscored_total)
       break;
-    auto it = std::find_if(result.begin(), result.end(), [&m](const auto &p) {
-      return p.first == uci::moveToUci(m);
-    });
+    auto it =
+        std::find_if(result.begin(), result.end(), [&board, &m](const auto &p) {
+          return cdbuci_to_move(board, p.first) == m;
+        });
 
     if (it == result.end()) {
       board.makeMove<true>(m);
-      auto r = cdbdirect_get(handle, board.getFen(false));
+      auto r = cdbdirect_get(handle, board.getXfen(false));
       stats.gets++;
       if (r.back().second != -2) {
         if (std::get<0>(count_unseen) == 0) {
@@ -216,7 +234,7 @@ void explore(const fen_set_t::EmbeddedSet &fen_list, int depth,
 
     // probe DB
     std::vector<std::pair<std::string, int>> result =
-        cdbdirect_get(handle, board.getFen(false));
+        cdbdirect_get(handle, board.getXfen(false));
     stats.gets++;
     size_t n_elements = result.size();
     int ply = result[n_elements - 1].second;
@@ -260,7 +278,7 @@ void explore(const fen_set_t::EmbeddedSet &fen_list, int depth,
         if (bestScore - pair.second > maxCPLoss)
           break;
 
-        Move m = uci::uciToMove(board, pair.first);
+        Move m = cdbuci_to_move(board, pair.first);
         board.makeMove<true>(m);
 
         PackedBoard pbfen = Board::Compact::encode(board);
@@ -288,17 +306,18 @@ void explore(const fen_set_t::EmbeddedSet &fen_list, int depth,
   }
 }
 
-size_t cdbsubtree(std::uintptr_t handle, std::string fen, int depth,
-                  int maxCPLoss, unseen_map_t *fens_with_unseen,
+size_t cdbsubtree(std::uintptr_t handle, std::string fen, bool chess960,
+                  int depth, int maxCPLoss, unseen_map_t *fens_with_unseen,
                   bool strict_subtree) {
 
-  std::cout << "Exploring fen: " << fen << std::endl;
+  Board board(fen, chess960);
+  auto xfen = board.getXfen(false);
+
+  std::cout << "Exploring fen: " << xfen << std::endl;
   std::cout << "Max depth: " << depth << std::endl;
   std::cout << "Max cp loss: " << maxCPLoss << std::endl;
 
-  Board board(fen);
-
-  int root_ply = cdbdirect_get(handle, board.getFen(false)).back().second;
+  int root_ply = cdbdirect_get(handle, xfen).back().second;
   if (root_ply == -2) {
     std::cout << "Initial fen not in DB!" << std::endl;
     return 0;
@@ -525,8 +544,9 @@ size_t cdbsubtree(std::uintptr_t handle, std::string fen, int depth,
                   << std::setw(18) << iter_nodess << std::setw(18)
                   << total_nodes << std::setw(18) << total_nodess;
         if (fens_with_unseen) {
-          auto unseen_str = std::to_string(fens_with_unseen->size()) + ":" +
-                            std::to_string(count_unseen_edges(*fens_with_unseen));
+          auto unseen_str =
+              std::to_string(fens_with_unseen->size()) + ":" +
+              std::to_string(count_unseen_edges(*fens_with_unseen));
 
           std::cout << std::setw(4) << "  " << std::setw(18) << unseen_str;
         }
@@ -569,16 +589,18 @@ int main(int argc, char const *argv[]) {
   if (fen == "startpos")
     fen = constants::STARTPOS;
 
+  bool chess960 = find_argument(args, pos, "--chess960", true);
   bool allmoves = find_argument(args, pos, "--moves", true);
   bool uncover = find_argument(args, pos, "--findUnseenEdges", true);
   bool strict_subtree = find_argument(args, pos, "--strictSubTree", true);
   unseen_map_t *fens_with_unseen = uncover ? new unseen_map_t : NULL;
 
-  std::cout << "Opening DB" << std::endl;
   std::uintptr_t handle = cdbdirect_initialize(CHESSDB_PATH);
+  std::uint64_t db_size = cdbdirect_size(handle);
+  std::cout << "DB count: " << db_size << std::endl;
 
   if (!allmoves) {
-    size_t total_assigned = cdbsubtree(handle, fen, depth, maxCPLoss,
+    size_t total_assigned = cdbsubtree(handle, fen, chess960, depth, maxCPLoss,
                                        fens_with_unseen, strict_subtree);
     std::cout << "Done analysing subtree of " << fen << " to depth " << depth
               << ":" << std::endl;
@@ -594,7 +616,7 @@ int main(int argc, char const *argv[]) {
     std::cout << std::endl;
   } else {
     std::cout << "Going through all moves for " << fen << std::endl;
-    Board board(fen);
+    Board board(fen, chess960);
     Movelist moves;
     movegen::legalmoves(moves, board);
     for (auto m : moves) {
@@ -602,20 +624,21 @@ int main(int argc, char const *argv[]) {
       std::streambuf *old = std::cout.rdbuf();
       std::stringstream ss;
       std::cout.rdbuf(ss.rdbuf());
-      fen = board.getFen(false);
+      fen = board.getXfen(false);
       unseen_map_t *local_fens_with_unseen = uncover ? new unseen_map_t : NULL;
       size_t total_assigned =
-          cdbsubtree(handle, fen, depth, maxCPLoss, local_fens_with_unseen,
-                     strict_subtree);
+          cdbsubtree(handle, fen, chess960, depth, maxCPLoss,
+                     local_fens_with_unseen, strict_subtree);
       std::cout.rdbuf(old);
-      std::cout << "    " << uci::moveToUci(m) << " : " << total_assigned
-                << " nodes";
+      std::cout << "    " << uci::moveToUci(m, chess960) << " : "
+                << total_assigned << " nodes";
       if (local_fens_with_unseen) {
         auto count = local_fens_with_unseen->size();
         if (count) {
           std::cout << ", " << count << " ("
                     << int(count * 100 / total_assigned + 0.5) << "%) have "
-                    << count_unseen_edges(*local_fens_with_unseen) << " unseen edges";
+                    << count_unseen_edges(*local_fens_with_unseen)
+                    << " unseen edges";
           // store the newly found nodes in the global hash map
           for (const auto &pair : *local_fens_with_unseen)
             (*fens_with_unseen)[pair.first] = pair.second;
@@ -632,7 +655,7 @@ int main(int argc, char const *argv[]) {
     assert(ufile.is_open());
     for (const auto &pair : *fens_with_unseen) {
       auto board = Board::Compact::decode(pair.first);
-      std::string fen = board.getFen(false);
+      std::string fen = board.getXfen(false);
       std::stringstream ss;
       ss << fen
          << " c0 \"unseen moves: " << static_cast<int>(std::get<0>(pair.second))
@@ -642,11 +665,15 @@ int main(int argc, char const *argv[]) {
     }
     ufile.close();
     std::cout << "Saved " << fens_with_unseen->size()
-              << " positions with a total of " << count_unseen_edges(*fens_with_unseen)
+              << " positions with a total of "
+              << count_unseen_edges(*fens_with_unseen)
               << " unseen edges in unseen.epd." << std::endl;
     auto improved = count_unseen_improved(*fens_with_unseen);
     if (improved)
-      std::cout << "For " << improved << " of these positions, an unseen edge would be a new best move." << std::endl;
+      std::cout
+          << "For " << improved
+          << " of these positions, an unseen edge would be a new best move."
+          << std::endl;
   }
 
   std::cout << "Closing DB" << std::endl;
